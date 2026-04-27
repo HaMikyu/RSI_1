@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  nginx:
+    build:
+      context: ./nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./logs:/var/log/nginx
+      - uploaded_icons:/var/www/uploads
+    depends_on:
+      - backend
+      - frontend
+
+  backend:
+    build:
+      context: ./backend
+    volumes:
+      - ./data:/app/data
+      - uploaded_icons:/app/uploads
+    environment:
+      - DATABASE_URL=sqlite:////app/data/notes.db
+
+  frontend:
+    build:
+      context: ./frontend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=/api
+
+volumes:
+  uploaded_icons:
