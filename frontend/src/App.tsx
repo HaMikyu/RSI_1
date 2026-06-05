@@ -9,18 +9,41 @@ interface Note {
 }
 
 function App() {
+  const [token, setToken] = useState(() => localStorage.getItem('token') || '');
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [currentUser, setCurrentUser] = useState('');
   const [notes, setNotes] = useState<Note[]>([]);
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [editingNote, setEditingNote] = useState<Note | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editContent, setEditContent] = useState('');
+  const [editFile, setEditFile] = useState<File | null>(null);
+  const [wsMessage, setWsMessage] = useState('');
 
   const API_URL = '/api';
+  const isAuthed = Boolean(token);
 
   const fetchNotes = async () => {
+    if (!token) return;
     try {
-      const res = await fetch(`${API_URL}/notes`);
-      if (res.ok) setNotes(await res.json());
+      const res = await fetch(`${API_URL}/notes`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (res.ok) {
+        setNotes(await res.json());
+      } else if (res.status === 401 || res.status === 403) {
+        setAuthError('Sesja wygasla. Zaloguj sie ponownie.');
+        localStorage.removeItem('token');
+        setToken('');
+      }
     } catch (err) {
       console.error(err);
     }
@@ -30,11 +53,85 @@ function App() {
     queueMicrotask(() => {
       void fetchNotes();
     });
-  }, []);
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${protocol}://${window.location.host}/api/ws`);
+
+    ws.onmessage = (event) => {
+      setWsMessage(event.data);
+    };
+
+    ws.onerror = () => {
+      setWsMessage('Brak polaczenia WebSocket.');
+    };
+
+    return () => ws.close();
+  }, [token]);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+
+    try {
+      const endpoint = authMode === 'login' ? '/login' : '/register';
+      const res = await fetch(`${API_URL}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ username, password }),
+      });
+
+      if (!res.ok) {
+        setAuthError('Logowanie/Rejestracja nieudane.');
+        return;
+      }
+
+      if (authMode === 'register') {
+        const loginRes = await fetch(`${API_URL}/login`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ username, password }),
+        });
+        if (!loginRes.ok) {
+          setAuthError('Zarejestrowano, ale logowanie nieudane.');
+          return;
+        }
+        const loginData = await loginRes.json();
+        localStorage.setItem('token', loginData.access_token);
+        setToken(loginData.access_token);
+        setCurrentUser(username);
+      } else {
+        const data = await res.json();
+        localStorage.setItem('token', data.access_token);
+        setToken(data.access_token);
+        setCurrentUser(username);
+      }
+
+      setUsername('');
+      setPassword('');
+    } catch (err) {
+      console.error(err);
+      setAuthError('Blad sieci.');
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    setToken('');
+    setNotes([]);
+    setCurrentUser('');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title || isSubmitting) return;
+    if (!title || isSubmitting || !isAuthed) return;
     
     const formData = new FormData();
     formData.append('title', title);
@@ -43,7 +140,17 @@ function App() {
 
     try {
       setIsSubmitting(true);
-      await fetch(`${API_URL}/notes`, { method: 'POST', body: formData });
+      const res = await fetch(`${API_URL}/notes`, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!res.ok) {
+        setAuthError('Brak dostepu do zapisu.');
+        return;
+      }
       setTitle(''); setContent(''); setFile(null); fetchNotes();
     } catch (err) {
        console.error(err);
@@ -54,9 +161,58 @@ function App() {
   
   const handleDelete = async (id: number) => {
     try {
-        await fetch(`${API_URL}/notes/${id}`, { method: 'DELETE' });
+        await fetch(`${API_URL}/notes/${id}`, {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
         fetchNotes();
     } catch (err) { console.error(err); }
+  };
+
+  const handleStartEdit = (note: Note) => {
+    setEditingNote(note);
+    setEditTitle(note.title);
+    setEditContent(note.content);
+    setEditFile(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingNote(null);
+    setEditTitle('');
+    setEditContent('');
+    setEditFile(null);
+  };
+
+  const handleUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingNote) return;
+
+    const formData = new FormData();
+    formData.append('title', editTitle);
+    formData.append('content', editContent);
+    if (editFile) formData.append('icon', editFile);
+
+    try {
+      const res = await fetch(`${API_URL}/notes/${editingNote.id}`, {
+        method: 'PUT',
+        body: formData,
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!res.ok) {
+        setAuthError('Nie udalo sie zaktualizowac notatki.');
+        return;
+      }
+
+      handleCancelEdit();
+      fetchNotes();
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   const cardAccents = [
@@ -89,12 +245,86 @@ function App() {
           </p>
         </header>
 
-        <main className="grid gap-8 lg:grid-cols-[minmax(320px,380px)_1fr] lg:items-start">
-          <section className="note-form-panel rounded-[2rem] border border-white/70 bg-white/80 p-6 shadow-[0_20px_70px_-35px_rgba(0,0,0,0.35)] backdrop-blur-xl sm:p-7">
-            <h2 className="display-font mb-1 text-2xl font-bold">Nowa notatka</h2>
-            <p className="mb-6 text-sm text-slate-600">Wpisz tytul, dodaj tresc i opcjonalnie obrazek okladki.</p>
+        {wsMessage ? (
+          <div className="rounded-2xl border border-white/70 bg-white/70 px-6 py-4 text-sm text-slate-700 shadow-[0_14px_35px_-24px_rgba(0,0,0,0.35)] backdrop-blur-xl">
+            WebSocket: {wsMessage}
+          </div>
+        ) : null}
 
-            <form onSubmit={handleSubmit} className="space-y-5" aria-label="Formularz dodawania notatki">
+        {!isAuthed ? (
+          <section className="rounded-[2rem] border border-white/70 bg-white/80 p-6 shadow-[0_20px_70px_-35px_rgba(0,0,0,0.35)] backdrop-blur-xl sm:p-7">
+            <h2 className="display-font mb-1 text-2xl font-bold">
+              {authMode === 'login' ? 'Logowanie' : 'Rejestracja'}
+            </h2>
+            <p className="mb-6 text-sm text-slate-600">
+              {authMode === 'login' ? 'Zaloguj sie, aby zobaczyc notatki.' : 'Utworz konto, aby zaczac.'}
+            </p>
+
+            <form onSubmit={handleAuth} className="space-y-5" aria-label="Formularz logowania lub rejestracji">
+              <div className="space-y-2">
+                <label htmlFor="username" className="block text-sm font-semibold text-slate-700">Login</label>
+                <input
+                  id="username"
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  required
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-[#36d1dc] focus:ring-4 focus:ring-[#36d1dc]/25"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="password" className="block text-sm font-semibold text-slate-700">Haslo</label>
+                <input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-[#ff6b6b] focus:ring-4 focus:ring-[#ff6b6b]/20"
+                />
+              </div>
+
+              {authError ? (
+                <p className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                  {authError}
+                </p>
+              ) : null}
+
+              <button
+                type="submit"
+                className="flex w-full items-center justify-center rounded-xl bg-gradient-to-r from-[#36d1dc] to-[#5b86e5] px-4 py-3 text-sm font-bold text-white shadow-[0_14px_30px_-12px_rgba(54,209,220,0.8)] transition hover:scale-[1.02] hover:shadow-[0_18px_36px_-12px_rgba(54,209,220,0.85)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#36d1dc]/35"
+              >
+                {authMode === 'login' ? 'Zaloguj sie' : 'Zarejestruj sie'}
+              </button>
+            </form>
+
+            <button
+              className="mt-4 text-sm font-semibold text-slate-700 underline"
+              onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+            >
+              {authMode === 'login' ? 'Nie masz konta? Zarejestruj sie' : 'Masz konto? Zaloguj sie'}
+            </button>
+          </section>
+        ) : (
+          <div className="flex items-center justify-between rounded-2xl border border-white/70 bg-white/75 px-5 py-4 text-sm text-slate-700 shadow-[0_16px_40px_-28px_rgba(0,0,0,0.35)] backdrop-blur-xl">
+            <span>Zalogowano jako: {currentUser || 'uzytkownik'}</span>
+            <button
+              className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700"
+              onClick={handleLogout}
+            >
+              Wyloguj
+            </button>
+          </div>
+        )}
+
+        <main className="grid gap-8 lg:grid-cols-[minmax(320px,380px)_1fr] lg:items-start">
+          {isAuthed ? (
+            <section className="note-form-panel rounded-[2rem] border border-white/70 bg-white/80 p-6 shadow-[0_20px_70px_-35px_rgba(0,0,0,0.35)] backdrop-blur-xl sm:p-7">
+              <h2 className="display-font mb-1 text-2xl font-bold">Nowa notatka</h2>
+              <p className="mb-6 text-sm text-slate-600">Wpisz tytul, dodaj tresc i opcjonalnie obrazek okladki.</p>
+
+              <form onSubmit={handleSubmit} className="space-y-5" aria-label="Formularz dodawania notatki">
               <div className="space-y-2">
                 <label htmlFor="title" className="block text-sm font-semibold text-slate-700">Tytul</label>
                 <input
@@ -141,8 +371,67 @@ function App() {
               >
                 {isSubmitting ? 'Zapisywanie...' : 'Dodaj notatke'}
               </button>
-            </form>
-          </section>
+              </form>
+
+              {editingNote ? (
+                <form onSubmit={handleUpdate} className="mt-8 space-y-5" aria-label="Formularz edycji notatki">
+                <h3 className="display-font text-xl font-bold">Edytuj notatke</h3>
+                <div className="space-y-2">
+                  <label htmlFor="edit-title" className="block text-sm font-semibold text-slate-700">Tytul</label>
+                  <input
+                    id="edit-title"
+                    type="text"
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    required
+                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-[#36d1dc] focus:ring-4 focus:ring-[#36d1dc]/25"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label htmlFor="edit-content" className="block text-sm font-semibold text-slate-700">Tresc</label>
+                  <textarea
+                    id="edit-content"
+                    value={editContent}
+                    onChange={(e) => setEditContent(e.target.value)}
+                    className="min-h-28 w-full resize-y rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-[#ff6b6b] focus:ring-4 focus:ring-[#ff6b6b]/20"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label htmlFor="edit-image" className="block text-sm font-semibold text-slate-700">Nowa okladka (opcjonalnie)</label>
+                  <input
+                    id="edit-image"
+                    type="file"
+                    onChange={(e) => e.target.files && setEditFile(e.target.files[0])}
+                    accept="image/*"
+                    className="block w-full cursor-pointer rounded-xl border border-dashed border-slate-300 bg-[#fffef8] px-3 py-2 text-sm text-slate-600 file:mr-3 file:cursor-pointer file:rounded-lg file:border-0 file:bg-[#1a1a1a] file:px-3 file:py-2 file:text-xs file:font-semibold file:text-white hover:border-[#f7971e]"
+                  />
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    type="submit"
+                    className="flex-1 rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white transition hover:opacity-90"
+                  >
+                    Zapisz zmiany
+                  </button>
+                  <button
+                    type="button"
+                    className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700"
+                    onClick={handleCancelEdit}
+                  >
+                    Anuluj
+                  </button>
+                </div>
+                </form>
+              ) : null}
+            </section>
+          ) : (
+            <section className="rounded-[2rem] border border-white/70 bg-white/80 p-6 text-sm text-slate-600 shadow-[0_20px_70px_-35px_rgba(0,0,0,0.35)] backdrop-blur-xl sm:p-7">
+              Zaloguj sie, aby dodawac i przegladac notatki.
+            </section>
+          )}
 
           <section className="space-y-5">
             <div className="flex items-center justify-between rounded-2xl border border-white/70 bg-white/75 px-5 py-4 shadow-[0_16px_40px_-28px_rgba(0,0,0,0.35)] backdrop-blur-xl">
@@ -152,7 +441,14 @@ function App() {
               </span>
             </div>
 
-            {notes.length === 0 ? (
+            {!isAuthed ? (
+              <div className="grid min-h-72 place-content-center rounded-[2rem] border-2 border-dashed border-slate-300 bg-white/70 p-8 text-center shadow-[0_16px_40px_-30px_rgba(0,0,0,0.35)] backdrop-blur-xl">
+                <h3 className="display-font text-2xl font-bold">Zaloguj sie</h3>
+                <p className="mt-2 max-w-md text-sm text-slate-600 sm:text-base">
+                  Twoje notatki pojawia sie po zalogowaniu.
+                </p>
+              </div>
+            ) : notes.length === 0 ? (
               <div className="grid min-h-72 place-content-center rounded-[2rem] border-2 border-dashed border-slate-300 bg-white/70 p-8 text-center shadow-[0_16px_40px_-30px_rgba(0,0,0,0.35)] backdrop-blur-xl">
                 <span className="mb-4 text-5xl" aria-hidden="true">🌈</span>
                 <h3 className="display-font text-2xl font-bold">Jeszcze pusto</h3>
@@ -189,13 +485,22 @@ function App() {
                         {note.title}
                       </h3>
                       <p className="min-h-20 whitespace-pre-wrap text-sm leading-6 text-slate-700">{note.content || 'Brak tresci.'}</p>
-                      <button
-                        className="w-full rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-700 transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-rose-300/60"
-                        onClick={() => handleDelete(note.id)}
-                        aria-label={`Usun notatke ${note.title}`}
-                      >
-                        Usun notatke
-                      </button>
+                      <div className="grid gap-2">
+                        <button
+                          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                          onClick={() => handleStartEdit(note)}
+                          aria-label={`Edytuj notatke ${note.title}`}
+                        >
+                          Edytuj notatke
+                        </button>
+                        <button
+                          className="w-full rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-700 transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-rose-300/60"
+                          onClick={() => handleDelete(note.id)}
+                          aria-label={`Usun notatke ${note.title}`}
+                        >
+                          Usun notatke
+                        </button>
+                      </div>
                     </div>
                   </article>
                 ))}

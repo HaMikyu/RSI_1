@@ -13,15 +13,9 @@ services:
     depends_on:
       - backend
       - frontend
-
-  backend:
-    build:
-      context: ./backend
-    volumes:
-      - ./data:/app/data
-      - uploaded_icons:/app/uploads
-    environment:
-      - DATABASE_URL=sqlite:////app/data/notes.db
+    networks:
+      - frontend_net
+      - backend_net
 
   frontend:
     build:
@@ -31,6 +25,53 @@ services:
       - /app/node_modules
     environment:
       - VITE_API_URL=/api
+    networks:
+      - frontend_net
+
+  backend:
+    build:
+      context: ./backend
+    volumes:
+      - uploaded_icons:/app/uploads
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/notesdb
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=supersecret123
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - backend_net
+      - db_net
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=notesdb
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - db_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d notesdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - db_net
+
+networks:
+  frontend_net:
+  backend_net:
+  db_net:
 
 volumes:
   uploaded_icons:
+  db_data:

@@ -3,3 +3,11 @@ uvicorn==0.23.2
 python-multipart==0.0.6
 sqlalchemy==2.0.21
 pydantic==2.4.2
+
+psycopg2-binary
+redis
+passlib[bcrypt]
+bcrypt
+PyJWT
+websockets
+slowapi
